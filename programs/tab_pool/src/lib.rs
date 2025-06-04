@@ -31,8 +31,47 @@ mod tab_pool {
     * 
     */
     pub fn pay(ctx: Context<Pay>) -> Result<()> {
+        let payer_key = ctx.accounts.payer.key();
+        let job = &mut ctx.accounts.job;
+        require!(!job.closed, ErrorCode::AlreadyClosed);
+
+        // find payer in job.payers
+        let mut found = false;
+        for ws in job.payers.iter_mut() {
+            if ws.wallet == payer_key {
+                require!(!ws.paid, ErrorCode::AlreadyPaid);
+                // transfer SOL from payer to payee
+                invoke(
+                    &system_instruction::transfer(
+                        &payer_key,
+                        &job.key(),
+                        job.amount,
+                    ),
+                    &[
+                        ctx.accounts.payer.to_account_info(),
+                        job.to_account_info(),
+                        ctx.accounts.system_program.to_account_info(),
+                    ],
+                )?;
+
+                ws.paid = true;
+                found = true;
+                msg!("{} paid {} lamports", payer_key, job.amount);
+                break;
+            }
+        }
+        require!(found, ErrorCode::NotContributor);
+
+        // Check if all contributors have paid - if yes, auto-distribute
+        if job.contributors.iter().all(|c| c.paid) {
+            msg!("All contributors have paid. Auto-distributing funds.");
+            //return _distribute_funds(job, &ctx.accounts.system_program);
+        }
+
         Ok(())
     }
+
+    pub fn distribute_funds(ctx: Context<DistributeFunds>) -> Result<()> {}
 
 }
 
@@ -68,6 +107,11 @@ pub struct Pay<'info> {
     pub payer: Signer<'info>,
 
     pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct DistributeFunds<'info> {
+
 }
 
 // ==================== Account Structs ====================
