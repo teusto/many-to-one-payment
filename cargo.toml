@@ -1,0 +1,10 @@
+[workspace]
+members = [
+    "programs/tab_pool",
+    "cli",
+    "shared",
+]
+
+[profile.release]
+opt-level = "z"
+overflow-checks = true

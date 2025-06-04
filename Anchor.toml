@@ -1,0 +1,6 @@
+[programs.localnet]
+tab_pool = "Hvddzj6Z3eFJheuabJGQNuchCoo4LjwDAQizRVTqW31D"
+
+[provider]
+cluster = "localnet"
+wallet = "~/.config/solana/id.json"

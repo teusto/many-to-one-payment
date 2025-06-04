@@ -1,0 +1,12 @@
+# Rust / Cargo
+/target/
+Cargo.lock
+# Anchor build outputs
+/.anchor/
+/programs/**/target/
+/ledger/
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+CONTENT.md
