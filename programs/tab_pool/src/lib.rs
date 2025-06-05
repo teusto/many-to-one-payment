@@ -31,39 +31,49 @@ mod tab_pool {
     * 
     */
     pub fn pay(ctx: Context<Pay>) -> Result<()> {
-        let payer_key = ctx.accounts.payer.key();
-        let job = &mut ctx.accounts.job;
-        require!(!job.closed, ErrorCode::AlreadyClosed);
+        // Check if job is closed first
+        require!(!ctx.accounts.job.closed, ErrorCode::AlreadyClosed);
 
-        // find payer in job.payers
-        let mut found = false;
-        for ws in job.payers.iter_mut() {
+        // Store payer key
+        let payer_key = ctx.accounts.payer.key();
+        
+        // Find payer index in job.payers without mutable borrow
+        let mut payer_index = None;
+        for (i, ws) in ctx.accounts.job.payers.iter().enumerate() {
             if ws.wallet == payer_key {
                 require!(!ws.paid, ErrorCode::AlreadyPaid);
-                // transfer SOL from payer to payee
-                invoke(
-                    &system_instruction::transfer(
-                        &payer_key,
-                        &job.key(),
-                        job.amount,
-                    ),
-                    &[
-                        ctx.accounts.payer.to_account_info(),
-                        job.to_account_info(),
-                        ctx.accounts.system_program.to_account_info(),
-                    ],
-                )?;
-
-                ws.paid = true;
-                found = true;
-                msg!("{} paid {} lamports", payer_key, job.amount);
+                payer_index = Some(i);
                 break;
             }
         }
-        require!(found, ErrorCode::NotContributor);
+
+        // Check if payer was found
+        let payer_index = payer_index.ok_or(error!(ErrorCode::NotContributor))?;
+
+        // Get key and amount before transfer
+        let job_key = ctx.accounts.job.key();
+        let amount = ctx.accounts.job.amount;
+
+        // Transfer SOL from payer to job account
+        invoke(
+            &system_instruction::transfer(
+                &payer_key,
+                &job_key,
+                amount,
+            ),
+            &[
+                ctx.accounts.payer.to_account_info(),
+                ctx.accounts.job.to_account_info(),
+                ctx.accounts.system_program.to_account_info(),
+            ],
+        )?;
+
+        // Now get mutable reference and mark payer as paid
+        ctx.accounts.job.payers[payer_index].paid = true;
+        msg!("{} paid {} lamports", payer_key, amount);
 
         // Check if all contributors have paid - if yes, auto-distribute
-        if job.contributors.iter().all(|c| c.paid) {
+        if ctx.accounts.job.payers.iter().all(|c| c.paid) {
             msg!("All contributors have paid. Auto-distributing funds.");
             //return _distribute_funds(job, &ctx.accounts.system_program);
         }
@@ -71,8 +81,65 @@ mod tab_pool {
         Ok(())
     }
 
-    pub fn distribute_funds(ctx: Context<DistributeFunds>) -> Result<()> {}
+    pub fn distribute_funds(ctx: Context<DistributeFunds>) -> Result<()> {
+        let job = &mut ctx.accounts.job;
+        require!(!job.closed, ErrorCode::AlreadyClosed);
 
+        // If authority is not the signer, check deadline
+        if !ctx.accounts.authority.key().eq(&job.authority) || !ctx.accounts.authority.is_signer {
+            let clock = Clock::get()?;
+            require!(clock.unix_timestamp >= job.deadline, ErrorCode::BeforeDeadline);
+        }
+
+        // Count paid contributors
+        let paid_count = job.payers.iter().filter(|p| p.paid).count();
+        if paid_count == 0 {
+            job.closed = true;
+            return Ok(());
+        }
+
+        // Calculate amounts
+        let total_collected = paid_count as u64 * job.amount;
+        let current_job_lamports = job.to_account_info().lamports();
+        require!(current_job_lamports >= total_collected, ErrorCode::InsufficientFunds);
+
+        let distributable_amount = std::cmp::min(total_collected, current_job_lamports);
+        let per_payee = distributable_amount / job.payees.len() as u64;
+
+        if per_payee > 0 {
+            // Clone payees to avoid borrow checker issues
+            let payees = job.payees.clone();
+            
+            // Mark job as closed before transfers
+            job.closed = true;
+
+            // Process transfers
+            for payee in payees.iter() {
+                // Create the instruction
+                let ix = system_instruction::transfer(
+                    &job.key(),
+                    payee, 
+                    per_payee
+                );
+                
+                // Process the CPI
+                let accounts = &[
+                    job.to_account_info(),
+                    ctx.accounts.system_program.to_account_info(),
+                ];
+                
+                anchor_lang::solana_program::program::invoke(&ix, accounts)?;
+                msg!("Transferred {} lamports to payee {}", per_payee, payee);
+            }
+            
+            msg!("Payment job closed and funds distributed");
+        } else {
+            job.closed = true;
+            msg!("Payment job closed (no funds to distribute)");
+        }
+        
+        Ok(())
+    }
 }
 
 // ==================== Account Structs ====================
@@ -111,7 +178,12 @@ pub struct Pay<'info> {
 
 #[derive(Accounts)]
 pub struct DistributeFunds<'info> {
+    #[account(mut)]
+    pub job: Account<'info, PaymentJob>,
 
+    pub authority: UncheckedAccount<'info>,
+
+    pub system_program: Program<'info, System>,
 }
 
 // ==================== Account Structs ====================
@@ -152,4 +224,10 @@ pub enum ErrorCode {
     AlreadyPaid,
     #[msg("Contributor is not listed")]
     NotContributor,
+    #[msg("Payment job is already closed")]
+    AlreadyClosed,
+    #[msg("Cannot distribute before deadline unless authority")]
+    BeforeDeadline,
+    #[msg("Insufficient funds in job account")]
+    InsufficientFunds,
 }
